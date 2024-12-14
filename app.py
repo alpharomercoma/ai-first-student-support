@@ -6,7 +6,7 @@ import base64
 # Set up the page configuration
 st.set_page_config(
     page_title="🌃 Midnight Mentor",
-    page_icon='./images/logo.jpg',
+    page_icon='./images/logo.png',
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -194,6 +194,8 @@ class MidnightMentorApp:
     def run(self):
         # Main content area
         st.markdown("<h1 style='text-align:center; color:#dec960;'>🌃 Midnight Mentor</h1>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align:center; color:#dec960;'><b>Made with 💙 by Team Amber!!<b></p>", unsafe_allow_html=True)
+
         st.markdown(
             "### Available Agents:\n"
             "- **🤖 Orchestrator Agent**: Manage and coordinate multiple AI agents.\n"
@@ -219,7 +221,7 @@ class MidnightMentorApp:
 
         # Sidebar for API key input
         with st.sidebar:
-            st.image('./images/logo.jpg')
+            st.image('./images/logo.png')
 
             # API key input
             api_key_container = st.empty()
