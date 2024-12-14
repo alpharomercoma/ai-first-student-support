@@ -2,152 +2,103 @@ import os
 import openai
 import streamlit as st
 import base64
+from swarm import Agent, Swarm
+from typing import List
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAI
+import numpy as np
+import faiss
+from duckduckgo_search import DDGS
+import pandas as pd
 
-# Set up the page configuration
-st.set_page_config(
-    page_title="🌃 Midnight Mentor",
-    page_icon='./images/logo.png',
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# Configuration and Environment Setup
+class MidnightMentorConfig:
+    def __init__(self):
+        # Ensure environment variables are set
+        if not os.getenv("OPENAI_API_KEY"):
+            print("Warning: OpenAI API Key not set in environment variables.")
 
-# Function to set the background image
-def set_background(image_path):
-    with open(image_path, "rb") as image_file:
-        image_data = base64.b64encode(image_file.read()).decode("utf-8")
+# PDF Processing Utility
+class PDFSwarmExtractor:
+    def __init__(self, max_workers: int = 4):
+        self.max_workers = max_workers
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=2000,
+            chunk_overlap=200
+        )
 
-    background_style = f"""
-    <style>
-    .stApp::before {{
-        content: "";
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background-image: url("data:image/jpg;base64,{image_data}");
-        background-size: cover;
-        background-position: center;
-        background-repeat: no-repeat;
-        filter: brightness(0.3) blur(5px);
-        z-index: -1;
-    }}
-    .stApp {{
-        background: rgba(0, 0, 0, 0.7);
-    }}
-    .stChatMessage {{
-        width: 80%;
-        margin: 1rem auto !important;
-        padding: 1.2rem !important;
-        border-radius: 12px !important;
-        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
-    }}
-    .stChatMessage div[data-testid="stMarkdownContainer"] {{
-        color: #ffffff;
-        font-size: 1.1rem;
-        line-height: 1.5;
-        text-shadow: 1px 1px 1px rgba(0,0,0,0.1);
-    }}
-    .stChatMessage.user-message {{
-        background-color: rgba(44, 44, 60, 0.95) !important;
-        margin-left: 20% !important;
-        border-left: 4px solid #dec960;
-    }}
-    .stChatMessage.assistant-message {{
-        background-color: rgba(66, 66, 99, 0.95) !important;
-        margin-right: 20% !important;
-        border-left: 4px solid #03a9f4;
-    }}
-    .stChatInputContainer {{
-        position: fixed;
-        bottom: 0;
-        left: 0;
-        right: 0;
-        padding: 1.5rem;
-        background-color: rgba(20, 20, 30, 0.95);
-        backdrop-filter: blur(10px);
-        border-top: 2px solid rgba(222, 201, 96, 0.2);
-        z-index: 1000;
-    }}
-    [data-testid="stChatMessageContainer"] {{
-        padding: 1rem;
-        margin-bottom: 80px;
-    }}
-    </style>
+    def process_single_pdf(self, pdf_path: str) -> List[str]:
+        try:
+            loader = PyPDFLoader(pdf_path)
+            pages = loader.load()
+            chunks = self.text_splitter.split_documents(pages)
+            texts = [chunk.page_content for chunk in chunks]
+            print(f"Successfully processed {pdf_path}")
+            return texts
+        except Exception as e:
+            print(f"Error processing {pdf_path}: {str(e)}")
+            return []
+
+    def process_pdf_directory(self, directory_path: str) -> dict:
+        pdf_files = [str(f) for f in Path(directory_path).glob("**/*.pdf")]
+        results = {}
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_pdf = {executor.submit(self.process_single_pdf, pdf): pdf for pdf in pdf_files}
+
+            for future in future_to_pdf:
+                pdf_path = future_to_pdf[future]
+                try:
+                    texts = future.result()
+                    results[pdf_path] = texts
+                except Exception as e:
+                    print(f"Error processing {pdf_path}: {str(e)}")
+                    results[pdf_path] = []
+
+        return results
+
+# Utility Functions for Embeddings and Search
+def get_embedding(text, model="text-embedding-ada-002"):
+    response = openai.Embedding.create(input=[text], model=model)
+    return response['data'][0]['embedding']
+
+def create_embeddings_and_retrieve(query, texts):
+    embeddings = [get_embedding(doc) for doc in texts]
+    embedding_dim = len(embeddings[0])
+    embeddings_np = np.array(embeddings).astype('float32')
+
+    index = faiss.IndexFlatL2(embedding_dim)
+    index.add(embeddings_np)
+
+    query_embedding = get_embedding(query)
+    query_embedding_np = np.array([query_embedding]).astype('float32')
+
+    _, indices = index.search(query_embedding_np, 2)
+    retrieved_docs = [texts[i] for i in indices[0]]
+    return ' '.join(retrieved_docs)
+
+def generate_project_ideas(context):
+    prompt = f"""
+    Based on the following context, generate innovative project ideas:
+    {context}
+
+    Please provide a list of project ideas that are relevant and actionable.
     """
-    st.markdown(background_style, unsafe_allow_html=True)
 
-# Custom CSS for enhanced styling
-def load_custom_css():
-    custom_css = """
-    <style>
-    :root {
-        --primary-color: #262730;
-        --secondary-color: #03a9f4;
-        --background-color: #1b1b1b;
-        --text-color: #ffffff;
-        --accent-color: #dec960;
-    }
-    body {
-        font-family: 'Inter', sans-serif;
-        color: var(--text-color);
-    }
-    .stSidebar {
-        background-color: rgba(20, 20, 30, 0.95) !important;
-        backdrop-filter: blur(10px);
-    }
-    .stSidebar .stMarkdown {
-        color: #ffffff;
-    }
-    .stButton>button {
-        background-color: var(--accent-color);
-        color: var(--primary-color);
-        border: none;
-        border-radius: 8px;
-        padding: 0.75rem 1.25rem;
-        font-weight: 600;
-        transition: all 0.3s ease;
-    }
-    .stButton>button:hover {
-        background-color: var(--secondary-color);
-        transform: scale(1.05);
-    }
-    .stTextInput input {
-        background-color: rgba(255, 255, 255, 0.1);
-        border: 2px solid rgba(255, 255, 255, 0.2);
-        border-radius: 8px;
-        color: white;
-        padding: 0.75rem 1rem;
-        font-size: 1rem;
-    }
-    .stTextInput input:focus {
-        border-color: var(--accent-color);
-        box-shadow: 0 0 0 2px rgba(222, 201, 96, 0.2);
-        background-color: rgba(255, 255, 255, 0.15);
-    }
-    h1 {
-        text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
-        letter-spacing: 1px;
-    }
-    ::-webkit-scrollbar {
-        width: 8px;
-        height: 8px;
-    }
-    ::-webkit-scrollbar-track {
-        background: rgba(0, 0, 0, 0.2);
-    }
-    ::-webkit-scrollbar-thumb {
-        background: rgba(222, 201, 96, 0.5);
-        border-radius: 4px;
-    }
-    ::-webkit-scrollbar-thumb:hover {
-        background: rgba(222, 201, 96, 0.7);
-    }
-    </style>
-    """
-    st.markdown(custom_css, unsafe_allow_html=True)
+    response = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "You are a project idea generator."},
+            {"role": "user", "content": prompt}
+        ]
+    )
 
-# Main application class
+    return response.choices[0].message.content
+
+# Midnight Mentor Streamlit Application
 class MidnightMentorApp:
     def __init__(self):
         # Initialize session state variables
@@ -156,73 +107,112 @@ class MidnightMentorApp:
         if 'api_key_validated' not in st.session_state:
             st.session_state.api_key_validated = False
 
+        # Initialize SWARM components
+        self.initialize_swarm_agents()
+
+    def initialize_swarm_agents(self):
+        # Initialize Swarm client
+        self.swarm_client = Swarm()
+
+        # Project Idea Generator Agent
+        self.project_generator_agent = Agent(
+            name="Project Idea Generator Agent",
+            model="gpt-4o-mini",
+            instructions="""
+            Generate project ideas based on lessons learned from an AI Engineering Bootcamp.
+            Consider various aspects such as machine learning, data analysis, and AI ethics.
+            """,
+            functions=[
+                create_embeddings_and_retrieve,
+                generate_project_ideas
+            ]
+        )
+
+        # Web Search Agent
+        self.web_search_agent = Agent(
+            name="Web Search Agent",
+            instructions="You are a website search agent specialized in searching website content.",
+            functions=[self.web_search]
+        )
+
+        # Python Expert Agent
+        self.python_expert_agent = Agent(
+            name="Python Expert Agent",
+            model="gpt-4o-mini",
+            instructions="""
+            You are a Python Expert AI assistant. Your task is to suggest Python libraries
+            that are highly suitable for the given query. Provide a brief explanation for
+            each library you recommend, focusing on its relevance and key features.
+            """
+        )
+
+        # Student Support (Orchestrator) Agent
+        self.student_support_agent = Agent(
+            name="Student Support Agent",
+            instructions="""
+            You are a student support agent that accepts bootcamp student's requests
+            and calls a tool to transfer to the right intent.
+            Transfer to the appropriate agent based on the request.
+            """
+        )
+
+    def web_search(self, query):
+        results = DDGS().text(
+            keywords=query,
+            region='wt-wt',
+            safesearch='off',
+            timelimit='7d',
+            max_results=10
+        )
+        return pd.DataFrame(results)
+
     def chat_message(self, content, role='assistant'):
-        # Add message to chat history
         st.session_state.chat_history.append({
             'role': role,
             'content': content
         })
-
-        # Display message
         with st.chat_message(role):
             st.markdown(content)
 
     def get_ai_response(self, user_input):
-        # System prompt for AI interaction
-        system_prompt = """
-        You are Midnight Mentor, an AI assistant designed to help users with various tasks.
-        You have multiple capabilities including:
-        - Project Idea Generation
-        - Python Library Expertise
-        - Complex Topic Breakdown
-        Provide concise, helpful, and creative responses.
-        """
-
-        # Generate response
         try:
-            response = openai.ChatCompletion.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_input}
-                ]
-            )
-            return response.choices[0].message.content
+            # Determine the most appropriate agent based on input
+            if "project" in user_input.lower():
+                response = self.swarm_client.run(
+                    agent=self.project_generator_agent,
+                    messages=[{"role": "user", "content": user_input}]
+                )
+            elif "python" in user_input.lower():
+                response = self.swarm_client.run(
+                    agent=self.python_expert_agent,
+                    messages=[{"role": "user", "content": user_input}]
+                )
+            else:
+                # Default to student support agent for routing
+                response = self.swarm_client.run(
+                    agent=self.student_support_agent,
+                    messages=[{"role": "user", "content": user_input}]
+                )
+
+            return response.messages[-1]["content"]
         except Exception as e:
             return f"An error occurred: {str(e)}"
 
     def run(self):
-        # Main content area
+        # Streamlit UI setup (similar to previous implementation)
         st.markdown("<h1 style='text-align:center; color:#dec960;'>🌃 Midnight Mentor</h1>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align:center; color:#dec960;'><b>Made with 💙 by Team Amber!!<b></p>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align:center; color:#dec960;'><b>Made with 💙 by Team Amber!!</b></p>", unsafe_allow_html=True)
 
         st.markdown(
             "### Available Agents:\n"
-            "- **🤖 Orchestrator Agent**: Manage and coordinate multiple AI agents.\n"
-            "- **💡 Project Idea Generator Agent**: Ideate creative and practical project concepts.\n"
-            "- **🐍 Python Library Expert**: Get expert guidance on Python libraries.\n"
-            "- **📖 Breakdown**: Simplify complex topics into digestible information.\n"
+            "- **🤖 Orchestrator Agent**: Manage and coordinate multiple AI agents\n"
+            "- **💡 Project Idea Generator Agent**: Ideate creative project concepts\n"
+            "- **🐍 Python Library Expert**: Get expert guidance on Python libraries\n"
+            "- **📖 Breakdown Agent**: Simplify complex topics\n"
         )
-
-        st.markdown(
-    "### How It Works:\n"
-    "1. **Content Analysis**: Midnight Mentor's AI analyzes the article, identifying core elements like pivotal events, key figures, and essential data points.\n"
-    "2. **Information Extraction**: We focus on extracting factual, relevant details—minimizing fluff, opinions, and noise.\n"
-    "3. **Structured Insights**: The AI organizes the information into a clear, easy-to-follow summary with actionable points and concise clarity.\n"
-    "4. **Objective Presentation**: Stay confident with accurate, unbiased summaries presented in an engaging, no-nonsense style.\n"
-    "\n"
-    "### Benefits\n"
-    "- **Save Time**: Gain key insights in seconds without wading through long-winded articles.\n"
-    "- **Boost Comprehension**: Simplify complex ideas for effortless understanding and actionable takeaways.\n"
-    "- **Stay Informed**: Keep up-to-date with trends, ideas, and innovations across industries, effortlessly.\n"
-    "- **Perfect for Learning**: Enhance your research, studies, or career development with fast, reliable summaries.\n"
-    "Midnight Mentor is your **personal knowledge companion**—ensuring you learn smarter, grow faster, and stay ahead of the curve, one summary at a time."
-)
 
         # Sidebar for API key input
         with st.sidebar:
-            st.image('./images/logo.png')
-
             # API key input
             api_key_container = st.empty()
             openai.api_key = api_key_container.text_input(
@@ -279,11 +269,10 @@ class MidnightMentorApp:
                 # AI response
                 self.chat_message(ai_response)
 
-# Main app execution
+# Main application execution
 def main():
-    # Set background and load custom CSS
-    set_background("./images/studio.jpg")
-    load_custom_css()
+    # Configuration setup
+    config = MidnightMentorConfig()
 
     # Initialize and run the app
     app = MidnightMentorApp()
